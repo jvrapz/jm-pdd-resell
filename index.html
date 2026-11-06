@@ -32,10 +32,26 @@ footer{color:var(--muted);font-size:11px;text-align:center;margin:18px 0}
 @media(max-width:850px){.cards{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:520px){header{padding:18px}header h1{font-size:20px}.cards{gap:8px}.card{padding:12px}.metric{font-size:20px}.grid{grid-template-columns:1fr}.field.wide{grid-column:span 1}.sale-row{grid-template-columns:1fr}.toolbar input{max-width:none;flex:1}}
 </style>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+#authPanel{max-width:460px;margin:28px auto;padding:20px;background:white;border:1px solid var(--line);border-radius:14px;box-shadow:0 2px 8px #1a2b4a08}
+#authPanel h2{margin:0 0 8px;font-size:18px}#authPanel .field{margin:12px 0}
+#authMessage{font-size:12px;color:var(--muted);margin-top:10px}
+#syncStatus{font-size:12px;color:#dbe4ff;margin-top:8px}
+body:not(.logged-in) #appMain{display:none}
+</style>
 </head>
 <body>
-<header><h1>📦 PDD Reseller Tracker</h1><p>Track purchases, delivery estimates, stock, sales, capital, and possible profit — all in one place.</p></header>
-<main>
+<header><h1>📦 PDD Reseller Tracker</h1><p>Track purchases, delivery estimates, stock, sales, capital, and possible profit — all in one place.</p><div id="syncStatus">Cloud sync: sign in to connect</div><button id="logoutBtn" class="secondary small" type="button" style="display:none;margin-top:8px">Log out</button></header>
+<section id="authPanel">
+ <h2>Shared inventory login</h2>
+ <p class="hint">Use the same email and password on both devices to access one shared inventory.</p>
+ <div class="field"><label for="authEmail">Email</label><input id="authEmail" type="email" autocomplete="username" placeholder="you@example.com"></div>
+ <div class="field"><label for="authPassword">Password</label><input id="authPassword" type="password" autocomplete="current-password" placeholder="At least 6 characters"></div>
+ <div class="actions"><button class="primary" id="loginBtn" type="button">Log in</button><button class="secondary" id="signupBtn" type="button">Create shared account</button></div>
+ <p id="authMessage">Enter your Supabase account details. Create the account once, then use it on both devices.</p>
+</section>
+<main id="appMain">
 <section class="cards">
  <div class="card"><div class="metric-label">Total purchase capital</div><div class="metric" id="capital">₱0.00</div><div class="sub">Item costs + extra costs</div></div>
  <div class="card"><div class="metric-label">Possible profit from remaining stock</div><div class="metric" id="possibleProfit">₱0.00</div><div class="sub">Based on your planned selling prices</div></div>
@@ -95,16 +111,16 @@ footer{color:var(--muted);font-size:11px;text-align:center;margin:18px 0}
 
 <section id="backup" class="panel hidden">
  <h2>Backup, restore, and export</h2>
- <p>Keep a backup so you can move your records to another browser or computer. Your data is saved in this browser on this device.</p>
+ <p>Download a backup of your shared inventory. Cloud synchronization is active when you are logged in.</p>
  <div class="actions">
   <button class="primary" id="backupBtn">Download full backup (JSON)</button>
   <button class="secondary" id="restoreBtn">Restore backup</button>
   <input type="file" id="restoreFile" accept=".json,application/json" class="hidden">
   <button class="secondary" id="salesCsvBtn">Export sales CSV</button>
  </div>
- <p class="hint">Important: browser data can be lost if you clear browser data, use a different browser, or change devices. Download a backup regularly. To use on your phone, open this same HTML file in a browser and restore the same backup there; records do not sync automatically between devices.</p>
+ <p class="hint">Your records are stored in Supabase and synchronized across devices logged in to the same account. Keep downloading backups as an extra precaution.</p>
 </section>
-<footer>Personal inventory tool · Amounts are in Philippine pesos (₱) · Data stays in your browser unless you export it.</footer>
+<footer>Personal inventory tool · Amounts are in Philippine pesos (₱) · Shared cloud database with local backup cache.</footer>
 </main>
 <script>
 const KEY='pdd_reseller_tracker_v1';
@@ -116,8 +132,87 @@ const today=()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth
 function addDays(s,n){if(!s)return '';const d=new Date(s+'T12:00:00');d.setDate(d.getDate()+n);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
 function updateDeliveryDate(){$('deliveryDate').value=addDays($('orderDate').value,30)}
 function updateCostPreviews(){const q=num($('qty').value),t=num($('purchaseTotal').value),x=num($('extraCost').value),sp=num($('sellPrice').value),base=q>0?t/q:0,landed=base+(q>0?x/q:0);$('unitCostPreview').value=money(base);$('totalUnitCostPreview').value=money(landed);$('profitPerPiecePreview').value=money(sp-landed)}
-function load(){try{const d=JSON.parse(localStorage.getItem(KEY)||'{}');items=Array.isArray(d.items)?d.items:[];sales=Array.isArray(d.sales)?d.sales:[];items=items.map(i=>{if(i.purchaseTotal===undefined)i.purchaseTotal=num(i.unitCost)*num(i.qty);i.unitCost=num(i.qty)>0?num(i.purchaseTotal)/num(i.qty):num(i.unitCost);return i});const activeIds=new Set(items.map(i=>String(i.id)));sales=sales.filter(x=>x.itemId!==undefined&&activeIds.has(String(x.itemId)));localStorage.setItem(KEY,JSON.stringify({items,sales}))}catch(e){items=[];sales=[]}}
-function save(){localStorage.setItem(KEY,JSON.stringify({items,sales}));render()}
+let supabaseClient=null, currentSession=null, realtimeChannel=null, applyingRemote=false;
+const SUPABASE_URL='https://vwbzodsclyeqvgtfiyvn.supabase.co';
+const SUPABASE_ANON_KEY='sb_publishable_xJ_46d5Q-kFgt9KJX8josQ_AuB4ZASQ';
+function normalizeData(d){
+ items=Array.isArray(d?.items)?d.items:[];
+ sales=Array.isArray(d?.sales)?d.sales:[];
+ items=items.map(i=>{if(i.purchaseTotal===undefined)i.purchaseTotal=num(i.unitCost)*num(i.qty);i.unitCost=num(i.qty)>0?num(i.purchaseTotal)/num(i.qty):num(i.unitCost);return i});
+ const activeIds=new Set(items.map(i=>String(i.id)));
+ sales=sales.filter(x=>x.itemId!==undefined&&activeIds.has(String(x.itemId)));
+}
+function load(){try{normalizeData(JSON.parse(localStorage.getItem(KEY)||'{}'))}catch(e){items=[];sales=[]}}
+function cacheData(){localStorage.setItem(KEY,JSON.stringify({items,sales}))}
+async function save(){
+ cacheData();render();
+ if(!currentSession||applyingRemote||!supabaseClient)return;
+ $('syncStatus').textContent='Cloud sync: saving…';
+ const {error}=await supabaseClient.from('tracker_state').upsert({
+  user_id:currentSession.user.id,data:{items,sales},updated_at:new Date().toISOString()
+ },{onConflict:'user_id'});
+ if(error){$('syncStatus').textContent='Cloud sync error: '+error.message;console.error(error)}
+ else $('syncStatus').textContent='Cloud sync: saved ✓';
+}
+function applyCloudData(data){
+ applyingRemote=true;normalizeData(data||{});cacheData();render();applyingRemote=false;
+ $('syncStatus').textContent='Cloud sync: updated ✓';
+}
+async function connectRealtime(){
+ if(realtimeChannel)await supabaseClient.removeChannel(realtimeChannel);
+ realtimeChannel=supabaseClient.channel('tracker-state-'+currentSession.user.id)
+ .on('postgres_changes',{event:'*',schema:'public',table:'tracker_state',filter:'user_id=eq.'+currentSession.user.id},payload=>{
+  if(payload.new&&payload.new.data)applyCloudData(payload.new.data);
+ })
+ .subscribe(status=>{if(status==='SUBSCRIBED')$('syncStatus').textContent='Cloud sync: connected ✓'});
+}
+async function finishLogin(session){
+ currentSession=session;$('logoutBtn').style.display='inline-block';document.body.classList.add('logged-in');$('authPanel').classList.add('hidden');
+ $('syncStatus').textContent='Cloud sync: loading…';
+ const {data,error}=await supabaseClient.from('tracker_state').select('data').eq('user_id',session.user.id).maybeSingle();
+ if(error){$('syncStatus').textContent='Database error: '+error.message;return}
+ if(data?.data){applyCloudData(data.data)}
+ else{
+  // First login: upload this browser's existing records as the initial shared inventory.
+  cacheData();
+  const {error:insertError}=await supabaseClient.from('tracker_state').insert({user_id:session.user.id,data:{items,sales}});
+  if(insertError){$('syncStatus').textContent='Could not initialize cloud data: '+insertError.message;return}
+  $('syncStatus').textContent='Cloud sync: initial records uploaded ✓';
+ }
+ await connectRealtime();render();
+}
+async function initializeCloud(){
+ if(!window.supabase){$('authMessage').textContent='Could not load the Supabase library. Check your internet connection.';return}
+ if(SUPABASE_URL.includes('PASTE_')||SUPABASE_ANON_KEY.includes('PASTE_')){
+  $('authMessage').textContent='Setup needed: add your Supabase Project URL and publishable (or anon) key in this file first.';
+  load();clearForm();render();return;
+ }
+ supabaseClient=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY);
+ const {data:{session}}=await supabaseClient.auth.getSession();
+ if(session){await finishLogin(session)}else{load();clearForm();render()}
+}
+$('logoutBtn').onclick=async()=>{
+ if(realtimeChannel)await supabaseClient.removeChannel(realtimeChannel);
+ await supabaseClient.auth.signOut();currentSession=null;document.body.classList.remove('logged-in');
+ $('authPanel').classList.remove('hidden');$('logoutBtn').style.display='none';$('syncStatus').textContent='Cloud sync: signed out';
+};
+$('loginBtn').onclick=async()=>{
+ const email=$('authEmail').value.trim(),password=$('authPassword').value;
+ if(!email||!password){$('authMessage').textContent='Enter your email and password.';return}
+ $('authMessage').textContent='Logging in…';
+ const {data,error}=await supabaseClient.auth.signInWithPassword({email,password});
+ if(error){$('authMessage').textContent=error.message;return}
+ await finishLogin(data.session);
+};
+$('signupBtn').onclick=async()=>{
+ const email=$('authEmail').value.trim(),password=$('authPassword').value;
+ if(!email||password.length<6){$('authMessage').textContent='Enter a valid email and a password with at least 6 characters.';return}
+ $('authMessage').textContent='Creating account…';
+ const {data,error}=await supabaseClient.auth.signUp({email,password});
+ if(error){$('authMessage').textContent=error.message;return}
+ if(data.session)await finishLogin(data.session);
+ else $('authMessage').textContent='Account created. Check your email for confirmation, then log in. If email confirmation is enabled, confirm before logging in.';
+};
 function costPerUnit(i){const base=i.purchaseTotal!==undefined?num(i.purchaseTotal)/Math.max(1,num(i.qty)):num(i.unitCost);return base+num(i.extraCost)/Math.max(1,num(i.qty))}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function render(){
@@ -156,6 +251,6 @@ $('restoreFile').onchange=async e=>{const file=e.target.files[0];if(!file)return
 function csv(rows){return rows.map(r=>r.map(v=>'"'+String(v??'').replace(/"/g,'""')+'"').join(',')).join('\r\n')}
 $('csvBtn').onclick=()=>{const rows=[['Item','Purchased qty','Sold qty','Remaining','Total PDD store price','PDD cost per piece','Extra costs','Selling price per piece','Possible profit on remaining stock','Order date','Expected delivery','Status','Notes'],...items.map(i=>[i.name,i.qty,i.sold,Math.max(0,num(i.qty)-num(i.sold)),i.purchaseTotal??(i.unitCost*i.qty),(i.purchaseTotal??(i.unitCost*i.qty))/Math.max(1,num(i.qty)),i.extraCost,i.sellPrice,(i.sellPrice-costPerUnit(i))*Math.max(0,num(i.qty)-num(i.sold)),i.orderDate,i.deliveryDate,i.status,i.notes])];download('pdd-inventory-'+today()+'.csv',csv(rows),'text/csv;charset=utf-8')};
 $('salesCsvBtn').onclick=()=>{const rows=[['Date','Item','Quantity','Selling price per unit','Revenue','Estimated profit'],...sales.map(s=>[s.date,s.itemName,s.qty,s.price,s.qty*s.price,s.profit])];download('pdd-sales-'+today()+'.csv',csv(rows),'text/csv;charset=utf-8')};
-load();clearForm();render();
+initializeCloud();
 </script>
 </body></html>
