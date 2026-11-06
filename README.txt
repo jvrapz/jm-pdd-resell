@@ -1,0 +1,1 @@
+PWA setup: upload all files in this folder to the ROOT of a public GitHub repository. GitHub Settings > Pages > Deploy from a branch > main > /(root) > Save. Open the published HTTPS URL and install from Chrome/Edge. Per-piece cost is calculated from total PDD store price divided by quantity. Existing old records are migrated. Local browser storage only; no cloud sync.
