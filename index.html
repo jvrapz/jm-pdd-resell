@@ -117,7 +117,23 @@ function previews(){const q=num($('qty').value),c=q?((num($('purchaseTotal').val
 ['qty','purchaseTotal','extraCost','sellPrice'].forEach(id=>$(id).addEventListener('input',previews));
 $('photo').onchange=async e=>{const file=e.target.files[0];photoData=null;if(!file){$('photoPreview').classList.add('hidden');return}if(!file.type.startsWith('image/')||file.size>5*1024*1024){alert('Choose an image up to 5 MB.');e.target.value='';return}photoData=file;$('photoPreview').src=URL.createObjectURL(file);$('photoPreview').classList.remove('hidden')};
 function clearForm(){$('itemForm').reset();$('editId').value='';$('extraCost').value='0';$('orderDate').value=today();$('photoPreview').classList.add('hidden');photoData=null;$('formTitle').textContent='Add a product';$('saveBtn').textContent='Save product';previews()}
-$('itemForm').onsubmit=async e=>{e.preventDefault();const id=$('editId').value,old=items.find(i=>i.id===id),qty=num($('qty').value);if(!Number.isInteger(qty)||qty<1){alert('Quantity must be a whole number of at least 1.');return}if(old&&qty<num(old.sold)){alert('Quantity cannot be less than units already sold.');return}let imageUrl=old?.imageUrl||'';if(photoData){if(!session){alert('Please log in first.');return}const ext=(photoData.name.split('.').pop()||'jpg').replace(/[^a-z0-9]/gi,'').toLowerCase()||'jpg',path=`${session.user.id}/${id||crypto.randomUUID()}/${Date.now()}.${ext}`;$('saveBtn').disabled=true;$('saveBtn').textContent='Uploading photo…';const {error}=await client.storage.from(BUCKET).upload(path,photoData,{upsert:true,contentType:photoData.type});if(error){alert('Photo upload failed. Check the Storage setup instructions. '+error.message);$('saveBtn').disabled=false;$('saveBtn').textContent=old?'Update product':'Save product';return}imageUrl=client.storage.from(BUCKET).getPublicUrl(path).data.publicUrl}
+$('itemForm').onsubmit=async e=>{e.preventDefault();const id=$('editId').value,old=items.find(i=>i.id===id),qty=num($('qty').value);if(!Number.isInteger(qty)||qty<1){alert('Quantity must be a whole number of at least 1.');return}if(old&&qty<num(old.sold)){alert('Quantity cannot be less than units already sold.');return}let imageUrl=old?.imageUrl||'';if(photoData){
+  $('saveBtn').disabled=true;$('saveBtn').textContent='Uploading photo…';
+  try {
+    const {data:userData,error:userError}=await client.auth.getUser();
+    if(userError||!userData?.user) throw new Error('Your login session could not be verified. Please log out and log in again.');
+    const userId=userData.user.id;
+    const ext=(photoData.name.split('.').pop()||'jpg').replace(/[^a-z0-9]/gi,'').toLowerCase()||'jpg';
+    const path=`${userId}/${id||crypto.randomUUID()}/${Date.now()}.${ext}`;
+    const {error:uploadError}=await client.storage.from(BUCKET).upload(path,photoData,{upsert:false,contentType:photoData.type});
+    if(uploadError) throw uploadError;
+    imageUrl=client.storage.from(BUCKET).getPublicUrl(path).data.publicUrl;
+  } catch(err) {
+    console.error('J&M photo upload error:',err);
+    alert('Photo upload failed: '+(err.message||String(err))+'\n\nPlease check that the product-photos bucket exists and that its INSERT policy allows the first folder to equal your logged-in user ID.');
+    $('saveBtn').disabled=false;$('saveBtn').textContent=old?'Update product':'Save product';return;
+  }
+}
  const obj={id:id||crypto.randomUUID(),name:$('name').value.trim(),purchaseTotal:num($('purchaseTotal').value),qty,sold:old?num(old.sold):0,sellPrice:num($('sellPrice').value),extraCost:num($('extraCost').value),orderDate:$('orderDate').value,status:$('status').value,notes:$('notes').value.trim(),imageUrl,createdAt:old?.createdAt||timestamp()};if(old)items=items.map(x=>x.id===id?obj:x);else items.push(obj);$('saveBtn').disabled=false;save();clearForm();tab('inventory')};
 $('cancelEdit').onclick=()=>{clearForm();tab('inventory')};
 window.editItem=id=>{const i=items.find(x=>x.id===id);if(!i)return;$('editId').value=i.id;$('name').value=i.name;$('purchaseTotal').value=i.purchaseTotal;$('qty').value=i.qty;$('sellPrice').value=i.sellPrice;$('extraCost').value=i.extraCost||0;$('orderDate').value=i.orderDate||'';$('status').value=i.status||'Ordered';$('notes').value=i.notes||'';if(i.imageUrl){$('photoPreview').src=i.imageUrl;$('photoPreview').classList.remove('hidden')}else $('photoPreview').classList.add('hidden');$('formTitle').textContent='Edit product';$('saveBtn').textContent='Update product';previews();tab('add')};
